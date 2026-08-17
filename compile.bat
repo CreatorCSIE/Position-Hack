@@ -5,19 +5,34 @@ rem  Usage:
 rem    compile.bat        compile main sources and package position-hack.jar
 rem    compile.bat test   also compile mock tests into build-test\ for run.bat mock
 rem ============================================================
-setlocal
+setlocal EnableDelayedExpansion
 
-set "JDK8=C:\Program Files\Java\jdk1.8.0_202"
+rem JDK 8 detection order (no need to edit this script):
+rem   1. POSITION_HACK_JDK env var (explicit, highest priority)
+rem   2. JAVA_HOME (used when it points to a JDK; CI's setup-java sets it)
+rem   3. auto-probe %ProgramFiles%\Java for jdk1.8* / jdk8*
+rem Use !VAR! (delayed expansion) here: referencing an *undefined* %VAR%
+rem inside an "if exist" can make cmd throw "was unexpected at this time",
+rem while !VAR! stays literal and is harmless.
+set "JDK8="
+if defined POSITION_HACK_JDK if exist "!POSITION_HACK_JDK!\bin\javac.exe" set "JDK8=!POSITION_HACK_JDK!"
+if not defined JDK8 if defined JAVA_HOME if exist "!JAVA_HOME!\bin\javac.exe" set "JDK8=!JAVA_HOME!"
+if not defined JDK8 (
+    for /d %%d in ("%ProgramFiles%\Java\jdk1.8*" "%ProgramFiles%\Java\jdk8*") do (
+        if not defined JDK8 if exist "%%d\bin\javac.exe" set "JDK8=%%d"
+    )
+)
+if not defined JDK8 (
+    echo [ERROR] Java 8 JDK not found - javac.exe is missing.
+    echo         Set POSITION_HACK_JDK to your JDK 8 home, or install JDK 8.
+    exit /b 1
+)
+echo [0/6] Using JDK: %JDK8%
+
 set "TOOLS_SRC=%JDK8%\lib\tools.jar"
 set "DLL_SRC=%JDK8%\jre\bin\attach.dll"
 set "ROOT=%~dp0"
 cd /d "%ROOT%"
-
-if not exist "%JDK8%\bin\javac.exe" (
-    echo [ERROR] JDK8 not found at: %JDK8%
-    echo         Please edit the JDK8 variable at the top of compile.bat
-    exit /b 1
-)
 
 set "SRC=src\org\github\creatorcsie\positionhack"
 set "BUILD=build"
@@ -31,13 +46,13 @@ set "NATIVES=natives"
 set "DLL=%NATIVES%\attach.dll"
 
 echo [1/6] Preparing runtime dependencies (lib\tools.jar + natives\attach.dll)...
-rem 发布物依赖两个 JDK 自带的运行时资源，会随 release zip 一起分发：
-rem   1. lib\tools.jar   提供 com.sun.tools.attach / sun.tools.attach 等 attach API，
-rem                       JRE 没有这些类；
-rem   2. natives\attach.dll 是 WindowsAttachProvider 静态初始化时
-rem                       System.loadLibrary("attach") 所需的原生库，JRE 里也没有。
-rem 每次编译都强制从 JDK 覆盖复制，避免旧文件残留（之前出现过复制的文件不完整，
-rem 导致 %1 not a valid Win32 application / error in opening zip file）。
+rem Two JDK-only runtime pieces must ship with every release:
+rem   1. lib\tools.jar      com.sun.tools.attach / sun.tools.attach API (absent in a JRE)
+rem   2. natives\attach.dll native library needed by WindowsAttachProvider's
+rem                          System.loadLibrary("attach") (also absent in a JRE)
+rem They are force-copied from the JDK on every build so stale/incomplete files
+rem (which caused "%1 is not a valid Win32 application" and zip-open errors)
+rem cannot survive between builds.
 if not exist "%LIBDIR%" mkdir "%LIBDIR%"
 if not exist "%TOOLS_SRC%" (
     echo [ERROR] tools.jar not found in JDK: %TOOLS_SRC%
@@ -60,12 +75,12 @@ if not exist "%DLL_SRC%" (
 )
 
 echo [2/6] Cleaning build dir...
-rem 清理失败（文件被占用）时继续，直接覆盖编译/打包
 if exist "%BUILD%" rmdir /s /q "%BUILD%" 2>nul
 mkdir "%BUILD%" 2>nul
 
 echo [3/6] Collecting sources...
-rem 中间文件（源文件清单 / MANIFEST.MF）写在 %TEMP%，不落入 build，也不会被卷进 jar
+rem Intermediate files (source list / MANIFEST.MF) go to %TEMP% so they never
+rem land in build\ or leak into the jar.
 dir /b /s /a-d "%SRC%\*.java" > "%TMPLIST%"
 
 echo [4/6] Compiling (Java 7 bytecode for old Minecraft JVMs)...
@@ -82,7 +97,7 @@ echo [5/6] Packaging %OUT%...
     echo Can-Retransform-Classes: true
     echo.
 ) > "%TMPMF%"
-rem 只打包编译产物目录 build\org（class 文件），sources.txt / MANIFEST.MF 不入 jar
+rem Only package build\org (the compiled classes); sources.txt / MANIFEST stay out.
 "%JDK8%\bin\jar.exe" cfm "%OUT%" "%TMPMF%" -C "%BUILD%" org
 if errorlevel 1 (
     echo [ERROR] Packaging failed

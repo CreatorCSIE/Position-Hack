@@ -1,0 +1,51 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ '[0-9]*' ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '8'
+
+      # compile.bat 会通过 JAVA_HOME（setup-java 已设置）找到 JDK 8，
+      # 自动生成 lib\tools.jar 与 natives\attach.dll，并打包 position-hack.jar。
+      - name: Compile (compile.bat)
+        shell: cmd
+        run: compile.bat
+
+      # 仅打 tag（v*）时：把四个发布项打成 release zip，并创建 draft release。
+      # main 分支只跑构建验证，不上传任何 artifacts。
+      - name: Package Release zip
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP "stage"
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item position-hack.jar -Destination $stage
+          Copy-Item run.bat -Destination $stage
+          Copy-Item lib -Destination $stage -Recurse
+          Copy-Item natives -Destination $stage -Recurse
+          $zip = "Position-Hack-${{ github.ref_name }}.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $zip
+          "ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+
+      - name: Create Draft Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: ${{ env.ZIP }}
